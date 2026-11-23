@@ -1,0 +1,181 @@
+import "dotenv/config";
+import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const app = express();
+const port = Number(process.env.PORT || 3001);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const cache = new Map();
+const CACHE_TTL = 1000 * 60 * 30;
+
+app.use(express.json());
+
+function cached(key, fetcher) {
+  const entry = cache.get(key);
+  if (entry && Date.now() - entry.savedAt < CACHE_TTL) {
+    return Promise.resolve({ ...entry.value, cachedAt: new Date(entry.savedAt).toISOString() });
+  }
+  return fetcher().then((value) => {
+    cache.set(key, { value, savedAt: Date.now() });
+    return { ...value, cachedAt: new Date().toISOString() };
+  });
+}
+
+async function getJson(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`Serviço externo respondeu ${response.status}`);
+  return response.json();
+}
+
+function tmdbUrl(endpoint, params = {}) {
+  const search = new URLSearchParams({ ...params, api_key: process.env.TMDB_API_KEY });
+  return `https://api.themoviedb.org/3${endpoint}?${search}`;
+}
+
+app.get("/api/search", async (req, res) => {
+  const query = String(req.query.q || "").trim();
+  const type = req.query.type === "movie" ? "movie" : req.query.type === "book" ? "book" : "all";
+  if (!query) return res.json({ results: [] });
+  try {
+    const results = [];
+    if (type !== "movie") {
+      const data = await getJson(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=16&langRestrict=pt`);
+      results.push(...(data.items || []).map((item) => {
+        const info = item.volumeInfo || {};
+        return {
+          id: item.id, kind: "book", title: info.title || "Título indisponível",
+          authors: info.authors || [], year: (info.publishedDate || "").slice(0, 4),
+          description: info.description || "", cover: info.imageLinks?.thumbnail?.replace("http://", "https://") || "",
+          genres: info.categories || [], isbn: info.industryIdentifiers?.find((id) => id.type === "ISBN_13")?.identifier || info.industryIdentifiers?.[0]?.identifier || "",
+          pageCount: info.pageCount || null
+        };
+      }));
+    }
+    if (type !== "book") {
+      if (!process.env.TMDB_API_KEY) {
+        if (type === "movie") return res.status(503).json({ error: "Configure TMDB_API_KEY para buscar filmes." });
+      } else {
+        const [data, genreData, people] = await Promise.all([
+          getJson(tmdbUrl("/search/movie", { query, language: "pt-BR", region: "BR", include_adult: "false" })),
+          getJson(tmdbUrl("/genre/movie/list", { language: "pt-BR" })),
+          getJson(tmdbUrl("/search/person", { query, language: "pt-BR", include_adult: "false" }))
+        ]);
+        const genreNames = new Map((genreData.genres || []).map((item) => [item.id, item.name]));
+        const movieResults = [...(data.results || [])];
+        const directors = (people.results || []).filter((person) => person.known_for_department === "Directing" || person.known_for_department === "Acting").slice(0, 3);
+        const directed = await Promise.all(directors.map((person) =>
+          getJson(tmdbUrl("/discover/movie", { with_crew: person.id, language: "pt-BR", region: "BR", sort_by: "popularity.desc" }))
+        ));
+        for (const result of directed) movieResults.push(...(result.results || []));
+        const uniqueMovies = [...new Map(movieResults.map((item) => [item.id, item])).values()];
+        results.push(...uniqueMovies.map((item) => ({
+          id: String(item.id), kind: "movie", title: item.title || item.original_title || "Título indisponível",
+          authors: [], year: (item.release_date || "").slice(0, 4), description: item.overview || "",
+          cover: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : "",
+          genres: (item.genre_ids || []).map((id) => genreNames.get(id)).filter(Boolean), director: ""
+        })));
+      }
+    }
+    res.json({ results });
+  } catch (error) {
+    res.status(502).json({ error: `Não foi possível consultar o catálogo: ${error.message}` });
+  }
+});
+
+app.get("/api/work/movie/:id", async (req, res) => {
+  if (!process.env.TMDB_API_KEY) return res.status(503).json({ error: "Configure TMDB_API_KEY para consultar filmes." });
+  try {
+    const [movie, credits] = await Promise.all([
+      getJson(tmdbUrl(`/movie/${encodeURIComponent(req.params.id)}`, { language: "pt-BR" })),
+      getJson(tmdbUrl(`/movie/${encodeURIComponent(req.params.id)}/credits`, { language: "pt-BR" }))
+    ]);
+    const director = (credits.crew || []).find((person) => person.job === "Director")?.name || "";
+    res.json({
+      work: {
+        id: String(movie.id), kind: "movie", title: movie.title, director,
+        year: (movie.release_date || "").slice(0, 4), description: movie.overview || "",
+        cover: movie.poster_path ? `https://image.tmdb.org/t/p/w500${movie.poster_path}` : "",
+        genres: (movie.genres || []).map((genre) => genre.name), runtime: movie.runtime || null
+      }
+    });
+  } catch (error) {
+    res.status(502).json({ error: `Não foi possível carregar o filme: ${error.message}` });
+  }
+});
+
+app.get("/api/work/book/:id", async (req, res) => {
+  try {
+    const data = await getJson(`https://www.googleapis.com/books/v1/volumes/${encodeURIComponent(req.params.id)}`);
+    const info = data.volumeInfo || {};
+    res.json({ work: {
+      id: data.id, kind: "book", title: info.title || "Título indisponível", authors: info.authors || [],
+      year: (info.publishedDate || "").slice(0, 4), description: info.description || "",
+      cover: info.imageLinks?.thumbnail?.replace("http://", "https://") || "",
+      genres: info.categories || [], isbn: info.industryIdentifiers?.find((item) => item.type === "ISBN_13")?.identifier || info.industryIdentifiers?.[0]?.identifier || "",
+      pageCount: info.pageCount || null
+    } });
+  } catch (error) {
+    res.status(502).json({ error: `Não foi possível carregar o livro: ${error.message}` });
+  }
+});
+
+app.get("/api/availability/book", async (req, res) => {
+  const isbn = String(req.query.isbn || "").trim();
+  const title = String(req.query.title || "").trim();
+  if (!process.env.SERPAPI_API_KEY) return res.status(503).json({ error: "Comparação de ofertas indisponível. Configure SERPAPI_API_KEY." });
+  if (!isbn && !title) return res.status(400).json({ error: "Informe ISBN ou título para buscar ofertas." });
+  const key = `book:${isbn || title}`;
+  try {
+    const result = await cached(key, async () => {
+      const params = new URLSearchParams({ engine: "google_shopping", q: isbn || title, gl: "br", hl: "pt-BR", api_key: process.env.SERPAPI_API_KEY });
+      const data = await getJson(`https://serpapi.com/search.json?${params}`);
+      const offers = (data.shopping_results || []).filter((item) => item.link).map((item) => ({
+        title: item.title || "", store: item.source || "Loja informada pelo provedor",
+        price: item.extracted_price ?? null,
+        priceText: item.price || (Number.isFinite(item.extracted_price) ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(item.extracted_price) : ""),
+        link: item.link, isbn: isbn || "",
+        format: /e-?book|digital|kindle/i.test(item.title || "") ? "Digital" :
+          /audiobook|audiolivro/i.test(item.title || "") ? "Audiolivro" :
+          /hardcover|capa dura/i.test(item.title || "") ? "Capa dura" :
+          /paperback|brochura|capa comum/i.test(item.title || "") ? "Capa comum" : "Formato não informado"
+      }));
+      return { offers, checkedAt: new Date().toISOString() };
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(502).json({ error: `Não foi possível consultar ofertas agora: ${error.message}` });
+  }
+});
+
+app.get("/api/availability/movie/:id", async (req, res) => {
+  if (!process.env.TMDB_API_KEY) return res.status(503).json({ error: "Disponibilidade indisponível. Configure TMDB_API_KEY." });
+  try {
+    const result = await cached(`movie:${req.params.id}`, async () => {
+      const data = await getJson(tmdbUrl(`/movie/${encodeURIComponent(req.params.id)}/watch/providers`));
+      const br = data.results?.BR || {};
+      const groups = [
+        ["subscription", "Incluído na assinatura"],
+        ["rent", "Alugar"],
+        ["buy", "Comprar"]
+      ].flatMap(([key, label]) => (br[key] || []).map((provider) => ({
+        category: label, provider: provider.provider_name,
+        link: br.link || "", price: null
+      })));
+      return { providers: groups, checkedAt: new Date().toISOString() };
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(502).json({ error: `Não foi possível consultar disponibilidade agora: ${error.message}` });
+  }
+});
+
+if (!process.env.VERCEL) {
+  if (process.env.NODE_ENV === "production") {
+    app.use(express.static(path.join(here, "dist")));
+    app.get("*", (_req, res) => res.sendFile(path.join(here, "dist", "index.html")));
+  }
+  app.listen(port, () => console.log(`Estante Aberta API disponível em http://localhost:${port}`));
+}
+
+export default app;
