@@ -33,26 +33,42 @@ function tmdbUrl(endpoint, params = {}) {
   return `https://api.themoviedb.org/3${endpoint}?${search}`;
 }
 
-const feeds = {
-  book: "https://itunes.apple.com/br/rss/toppaidebooks/limit=200/json",
-  movie: "https://itunes.apple.com/br/rss/topmovies/limit=200/json"
+const charts = {
+  book: { name: "toppaidebooks", genres: [9031, 9003, 9007, 9018, 9020, 9027, 9032, 9033, 9035, 9037, 9002, 9012] },
+  movie: { name: "topmovies", genres: [4401, 4402, 4403, 4404, 4405, 4406, 4407, 4408, 4409, 4410, 4411, 4412, 4413, 4415, 4416, 4417] }
 };
-
 function cover(url = "") {
   return url.replace(/\d+x\d+bb(?=\.)/, "300x450bb");
 }
 
 app.get("/api/featured/:kind", async (req, res) => {
   const kind = req.params.kind;
-  if (!Object.hasOwn(feeds, kind)) return res.sendStatus(404);
+  if (!Object.hasOwn(charts, kind)) return res.sendStatus(404);
   try {
     const data = await cached("featured:" + kind, async () => {
-      const { feed } = await getJson(feeds[kind], { signal: AbortSignal.timeout(10000) });
-      const works = feed.entry.map(entry => ({
+      const { name, genres } = charts[kind];
+      const paths = [name + "/limit=100", ...genres.map(id => name + "/limit=100/genre=" + id)];
+      if (kind === "book") paths.push("topfreeebooks/limit=100");
+      const entries = new Map();
+      for (let offset = 0; offset < paths.length; offset += 6) {
+        const batch = await Promise.allSettled(paths.slice(offset, offset + 6).map(async path => {
+          const { feed } = await getJson("https://itunes.apple.com/br/rss/" + path + "/json", { signal: AbortSignal.timeout(5000) });
+          return feed.entry || [];
+        }));
+        for (const result of batch) {
+          if (result.status !== "fulfilled") continue;
+          for (const entry of result.value) {
+            const id = entry.id?.attributes?.["im:id"];
+            if (id && !entries.has(id)) entries.set(id, entry);
+          }
+        }
+      }
+      if (!entries.size) throw new Error("Catálogo indisponível");
+      const works = Array.from(entries.values(), entry => ({
         id: "apple-" + entry.id.attributes["im:id"], kind, title: entry["im:name"].label,
         authors: kind === "book" ? [entry["im:artist"]?.label].filter(Boolean) : [],
         director: kind === "movie" ? entry["im:artist"]?.label : "",
-        year: entry["im:releaseDate"]?.label.slice(0, 4), description: entry.summary?.label,
+        year: entry["im:releaseDate"]?.label.slice(0, 4),
         cover: cover(entry["im:image"].at(-1)?.label), genres: [entry.category?.attributes.label].filter(Boolean)
       }));
       return { works };
