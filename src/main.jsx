@@ -27,6 +27,7 @@ function App() {
   const [type, setType] = useState("all");
   const [genre, setGenre] = useState("");
   const [results, setResults] = useState([]);
+  const [searched, setSearched] = useState(false);
   const [collections, setCollections] = useState([]);
   const [ownCollections, setOwnCollections] = useState([]);
   const [shelf, setShelf] = useState([]);
@@ -102,6 +103,8 @@ function App() {
   async function search(event) {
     event?.preventDefault();
     if (!query.trim()) return;
+    setSearched(false);
+    setGenre("");
     setBusy(true);
     setMessage("");
     setSelected(null);
@@ -110,6 +113,7 @@ function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Falha na busca.");
       setResults(data.results || []);
+      setSearched(true);
     } catch (error) {
       setResults([]);
       setMessage(error.message);
@@ -258,7 +262,7 @@ function App() {
 
       <main>
         {!selected && page === "explore" && <ExplorePage query={query} setQuery={setQuery} type={type} setType={setType} search={search}
-          busy={busy} message={message} collections={collections} openWork={openWork} results={filteredResults}
+          busy={busy} searched={searched} message={message} collections={collections} openWork={openWork} results={filteredResults}
           genre={genre} setGenre={setGenre} genres={genres} setPage={setPage} setActiveCollection={setActiveCollection}
           setSelected={setSelected} />}
         {!selected && page === "public" && <PublicPage collections={collections} activeCollection={activeCollection}
@@ -327,7 +331,7 @@ function FeaturedRow({ kind, openWork }) {
     </> : <p className="muted" role="status">{works ? "Destaques indisponíveis no momento." : "Carregando destaques…"}</p>}
   </section>;
 }
-function ExplorePage({ query, setQuery, type, setType, search, busy, message, collections, openWork, results, genre, setGenre, genres, setPage, setActiveCollection }) {
+function ExplorePage({ query, setQuery, type, setType, search, busy, searched, message, collections, openWork, results, genre, setGenre, genres, setPage, setActiveCollection }) {
   return <div className="page-wrap">
     <section className="hero">
       <div className="hero-copy"><span className="eyebrow"><Sparkles size={14} /> HISTÓRIAS QUE ENCONTRAM VOCÊ</span>
@@ -348,9 +352,9 @@ function ExplorePage({ query, setQuery, type, setType, search, busy, message, co
     </section>
 
     {message && <div className="inline-notice">{message}</div>}
-    {results.length > 0 && <section className="section-block search-results">
+    {searched && <section className="section-block search-results">
       <div className="section-heading"><div><span className="eyebrow">CATÁLOGO</span><h2>Resultados da busca</h2></div><span className="result-count">{results.length} obras</span></div>
-      {results.length ? <div className="book-row">{results.map((item) => <WorkCard key={`${item.kind}-${item.id}`} item={item} onClick={() => openWork(item)} />)}</div> : <p className="muted">Nenhuma obra encontrada para esse gênero.</p>}
+      {results.length ? <div className="book-row">{results.map((item) => <WorkCard key={`${item.kind}-${item.id}`} item={item} onClick={() => openWork(item)} />)}</div> : <p className="muted">Nenhuma obra encontrada. Experimente outro título, autor ou diretor.</p>}
     </section>}
 
     {type !== "movie" && <FeaturedRow kind="book" openWork={openWork} />}

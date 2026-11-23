@@ -41,38 +41,42 @@ function cover(url = "") {
   return url.replace(/\d+x\d+bb(?=\.)/, "300x450bb");
 }
 
+function featuredCatalog(kind) {
+  return cached("featured:" + kind, async () => {
+    const { name, genres } = charts[kind];
+    const paths = [name + "/limit=100", ...genres.map(id => name + "/limit=100/genre=" + id)];
+    if (kind === "book") paths.push("topfreeebooks/limit=100");
+    const entries = new Map();
+    for (let offset = 0; offset < paths.length; offset += 6) {
+      const batch = await Promise.allSettled(paths.slice(offset, offset + 6).map(async path => {
+        const { feed } = await getJson("https://itunes.apple.com/br/rss/" + path + "/json", { signal: AbortSignal.timeout(5000) });
+        return feed.entry || [];
+      }));
+      for (const result of batch) {
+        if (result.status !== "fulfilled") continue;
+        for (const entry of result.value) {
+          const id = entry.id?.attributes?.["im:id"];
+          if (id && !entries.has(id)) entries.set(id, entry);
+        }
+      }
+    }
+    if (!entries.size) throw new Error("Catálogo indisponível");
+    const works = Array.from(entries.values(), entry => ({
+      id: "apple-" + entry.id.attributes["im:id"], kind, title: entry["im:name"].label,
+      authors: kind === "book" ? [entry["im:artist"]?.label].filter(Boolean) : [],
+      director: kind === "movie" ? entry["im:artist"]?.label : "",
+      year: entry["im:releaseDate"]?.label.slice(0, 4),
+      cover: cover(entry["im:image"].at(-1)?.label), genres: [entry.category?.attributes.label].filter(Boolean)
+    }));
+    return { works };
+  });
+}
+
 app.get("/api/featured/:kind", async (req, res) => {
   const kind = req.params.kind;
   if (!Object.hasOwn(charts, kind)) return res.sendStatus(404);
   try {
-    const data = await cached("featured:" + kind, async () => {
-      const { name, genres } = charts[kind];
-      const paths = [name + "/limit=100", ...genres.map(id => name + "/limit=100/genre=" + id)];
-      if (kind === "book") paths.push("topfreeebooks/limit=100");
-      const entries = new Map();
-      for (let offset = 0; offset < paths.length; offset += 6) {
-        const batch = await Promise.allSettled(paths.slice(offset, offset + 6).map(async path => {
-          const { feed } = await getJson("https://itunes.apple.com/br/rss/" + path + "/json", { signal: AbortSignal.timeout(5000) });
-          return feed.entry || [];
-        }));
-        for (const result of batch) {
-          if (result.status !== "fulfilled") continue;
-          for (const entry of result.value) {
-            const id = entry.id?.attributes?.["im:id"];
-            if (id && !entries.has(id)) entries.set(id, entry);
-          }
-        }
-      }
-      if (!entries.size) throw new Error("Catálogo indisponível");
-      const works = Array.from(entries.values(), entry => ({
-        id: "apple-" + entry.id.attributes["im:id"], kind, title: entry["im:name"].label,
-        authors: kind === "book" ? [entry["im:artist"]?.label].filter(Boolean) : [],
-        director: kind === "movie" ? entry["im:artist"]?.label : "",
-        year: entry["im:releaseDate"]?.label.slice(0, 4),
-        cover: cover(entry["im:image"].at(-1)?.label), genres: [entry.category?.attributes.label].filter(Boolean)
-      }));
-      return { works };
-    });
+    const data = await featuredCatalog(kind);
     res.set("Cache-Control", "public, s-maxage=1800, stale-while-revalidate=86400").json(data);
   } catch {
     res.status(502).json({ error: "Destaques temporariamente indisponíveis." });
@@ -102,56 +106,74 @@ app.get("/api/work/:kind/:id", async (req, res, next) => {
     res.status(502).json({ error: "Detalhes temporariamente indisponíveis." });
   }
 });
+async function searchGoogleBooks(query) {
+  const data = await getJson(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=16&langRestrict=pt`, { signal: AbortSignal.timeout(3500) });
+  return (data.items || []).map((item) => {
+    const info = item.volumeInfo || {};
+    return {
+      id: item.id, kind: "book", title: info.title || "Título indisponível",
+      authors: info.authors || [], year: (info.publishedDate || "").slice(0, 4),
+      description: info.description || "", cover: info.imageLinks?.thumbnail?.replace("http://", "https://") || "",
+      genres: info.categories || [], isbn: info.industryIdentifiers?.find((id) => id.type === "ISBN_13")?.identifier || info.industryIdentifiers?.[0]?.identifier || "",
+      pageCount: info.pageCount || null
+    };
+  });
+}
+
+async function searchTmdb(query) {
+  const [data, genreData, people] = await Promise.all([
+    getJson(tmdbUrl("/search/movie", { query, language: "pt-BR", region: "BR", include_adult: "false" })),
+    getJson(tmdbUrl("/genre/movie/list", { language: "pt-BR" })),
+    getJson(tmdbUrl("/search/person", { query, language: "pt-BR", include_adult: "false" }))
+  ]);
+  const genreNames = new Map((genreData.genres || []).map((item) => [item.id, item.name]));
+  const movieResults = [...(data.results || [])];
+  const directors = (people.results || []).filter((person) => person.known_for_department === "Directing" || person.known_for_department === "Acting").slice(0, 3);
+  const directed = await Promise.all(directors.map((person) =>
+    getJson(tmdbUrl("/discover/movie", { with_crew: person.id, language: "pt-BR", region: "BR", sort_by: "popularity.desc" }))
+  ));
+  for (const result of directed) movieResults.push(...(result.results || []));
+  const uniqueMovies = [...new Map(movieResults.map((item) => [item.id, item])).values()];
+  return uniqueMovies.map((item) => ({
+    id: String(item.id), kind: "movie", title: item.title || item.original_title || "Título indisponível",
+    authors: [], year: (item.release_date || "").slice(0, 4), description: item.overview || "",
+    cover: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : "",
+    genres: (item.genre_ids || []).map((id) => genreNames.get(id)).filter(Boolean), director: ""
+  }));
+}
+
+function normalizeText(text) {
+  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+async function searchCatalog(kind, words) {
+  const { works } = await featuredCatalog(kind);
+  return works.filter(work => {
+    const fields = normalizeText([work.title, ...(work.authors || []), work.director].filter(Boolean).join(" "));
+    return words.every(word => fields.includes(word));
+  });
+}
+
 app.get("/api/search", async (req, res) => {
   const query = String(req.query.q || "").trim();
-  const type = req.query.type === "movie" ? "movie" : req.query.type === "book" ? "book" : "all";
-  if (!query) return res.json({ results: [] });
-  try {
-    const results = [];
-    if (type !== "movie") {
-      const data = await getJson(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=16&langRestrict=pt`);
-      results.push(...(data.items || []).map((item) => {
-        const info = item.volumeInfo || {};
-        return {
-          id: item.id, kind: "book", title: info.title || "Título indisponível",
-          authors: info.authors || [], year: (info.publishedDate || "").slice(0, 4),
-          description: info.description || "", cover: info.imageLinks?.thumbnail?.replace("http://", "https://") || "",
-          genres: info.categories || [], isbn: info.industryIdentifiers?.find((id) => id.type === "ISBN_13")?.identifier || info.industryIdentifiers?.[0]?.identifier || "",
-          pageCount: info.pageCount || null
-        };
-      }));
-    }
-    if (type !== "book") {
-      if (!process.env.TMDB_API_KEY) {
-        if (type === "movie") return res.status(503).json({ error: "Configure TMDB_API_KEY para buscar filmes." });
-      } else {
-        const [data, genreData, people] = await Promise.all([
-          getJson(tmdbUrl("/search/movie", { query, language: "pt-BR", region: "BR", include_adult: "false" })),
-          getJson(tmdbUrl("/genre/movie/list", { language: "pt-BR" })),
-          getJson(tmdbUrl("/search/person", { query, language: "pt-BR", include_adult: "false" }))
-        ]);
-        const genreNames = new Map((genreData.genres || []).map((item) => [item.id, item.name]));
-        const movieResults = [...(data.results || [])];
-        const directors = (people.results || []).filter((person) => person.known_for_department === "Directing" || person.known_for_department === "Acting").slice(0, 3);
-        const directed = await Promise.all(directors.map((person) =>
-          getJson(tmdbUrl("/discover/movie", { with_crew: person.id, language: "pt-BR", region: "BR", sort_by: "popularity.desc" }))
-        ));
-        for (const result of directed) movieResults.push(...(result.results || []));
-        const uniqueMovies = [...new Map(movieResults.map((item) => [item.id, item])).values()];
-        results.push(...uniqueMovies.map((item) => ({
-          id: String(item.id), kind: "movie", title: item.title || item.original_title || "Título indisponível",
-          authors: [], year: (item.release_date || "").slice(0, 4), description: item.overview || "",
-          cover: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : "",
-          genres: (item.genre_ids || []).map((id) => genreNames.get(id)).filter(Boolean), director: ""
-        })));
-      }
-    }
-    res.json({ results });
-  } catch (error) {
-    res.status(502).json({ error: `Não foi possível consultar o catálogo: ${error.message}` });
+  const text = normalizeText(query);
+  if (!text) return res.json({ results: [] });
+  const kinds = ["book", "movie"].includes(req.query.type) ? [req.query.type] : ["book", "movie"];
+  const sources = kinds.map(kind => searchCatalog(kind, text.split(" ")));
+  if (kinds.includes("book")) sources.push(searchGoogleBooks(query));
+  if (kinds.includes("movie") && process.env.TMDB_API_KEY) sources.push(searchTmdb(query));
+  const responses = await Promise.allSettled(sources);
+  const available = responses.filter(response => response.status === "fulfilled");
+  if (!available.length) return res.status(503).json({ error: "A busca está temporariamente indisponível. Tente novamente." });
+  const results = available.flatMap(response => response.value);
+  function rank(work) {
+    const title = normalizeText(work.title);
+    if (title === text) return 0;
+    return title.startsWith(text) ? 1 : 2;
   }
+  results.sort((a, b) => rank(a) - rank(b));
+  res.json({ results });
 });
-
 app.get("/api/work/movie/:id", async (req, res) => {
   if (!process.env.TMDB_API_KEY) return res.status(503).json({ error: "Configure TMDB_API_KEY para consultar filmes." });
   try {
