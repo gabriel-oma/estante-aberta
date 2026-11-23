@@ -34,8 +34,8 @@ function tmdbUrl(endpoint, params = {}) {
 }
 
 const feeds = {
-  book: "https://itunes.apple.com/br/rss/toppaidebooks/limit=10/json",
-  movie: "https://itunes.apple.com/br/rss/topmovies/limit=10/json"
+  book: "https://itunes.apple.com/br/rss/toppaidebooks/limit=200/json",
+  movie: "https://itunes.apple.com/br/rss/topmovies/limit=200/json"
 };
 
 function cover(url = "") {

@@ -339,3 +339,5 @@ footer { width: min(1120px, 90%); margin: auto auto 0; min-height: 66px; border-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+.featured-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(135px, 100%), 1fr)); gap: 20px 16px; padding-bottom: 16px; }

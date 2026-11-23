@@ -303,6 +303,7 @@ function App() {
 
 function FeaturedRow({ kind, openWork }) {
   const [works, setWorks] = useState(null);
+  const [visible, setVisible] = useState(12);
   useEffect(() => {
     const controller = new AbortController();
     fetch("/api/featured/" + kind, { signal: controller.signal })
@@ -315,10 +316,15 @@ function FeaturedRow({ kind, openWork }) {
     return () => controller.abort();
   }, [kind]);
   return <section className="section-block">
-    <div className="section-heading"><h2>{kind === "book" ? "Livros em destaque" : "Filmes em destaque"}</h2></div>
-    {works?.length ? <div className="book-row">{works.map(item =>
+    <div className="section-heading"><h2>{kind === "book" ? "Livros em destaque" : "Filmes em destaque"}</h2>
+      {works?.length > 0 && <span className="result-count">{works.length} {kind === "book" ? "livros" : "filmes"}</span>}</div>
+    {works?.length ? <><div className={visible === 12 ? "book-row" : "featured-grid"}>{works.slice(0, visible).map(item =>
       <WorkCard key={item.id} item={item} onClick={() => openWork(item)} />
-    )}</div> : <p className="muted" role="status">{works ? "Destaques indisponíveis no momento." : "Carregando destaques…"}</p>}
+    )}</div>
+      {visible < works.length && <button className="text-button" onClick={() => setVisible(count => count + 24)}>
+        Mostrar mais {kind === "book" ? "livros" : "filmes"} <ChevronDown size={16} />
+      </button>}
+    </> : <p className="muted" role="status">{works ? "Destaques indisponíveis no momento." : "Carregando destaques…"}</p>}
   </section>;
 }
 function ExplorePage({ query, setQuery, type, setType, search, busy, message, collections, openWork, results, genre, setGenre, genres, setPage, setActiveCollection }) {
