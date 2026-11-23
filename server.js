@@ -33,6 +33,59 @@ function tmdbUrl(endpoint, params = {}) {
   return `https://api.themoviedb.org/3${endpoint}?${search}`;
 }
 
+const feeds = {
+  book: "https://itunes.apple.com/br/rss/toppaidebooks/limit=10/json",
+  movie: "https://itunes.apple.com/br/rss/topmovies/limit=10/json"
+};
+
+function cover(url = "") {
+  return url.replace(/\d+x\d+bb(?=\.)/, "300x450bb");
+}
+
+app.get("/api/featured/:kind", async (req, res) => {
+  const kind = req.params.kind;
+  if (!Object.hasOwn(feeds, kind)) return res.sendStatus(404);
+  try {
+    const data = await cached("featured:" + kind, async () => {
+      const { feed } = await getJson(feeds[kind], { signal: AbortSignal.timeout(10000) });
+      const works = feed.entry.map(entry => ({
+        id: "apple-" + entry.id.attributes["im:id"], kind, title: entry["im:name"].label,
+        authors: kind === "book" ? [entry["im:artist"]?.label].filter(Boolean) : [],
+        director: kind === "movie" ? entry["im:artist"]?.label : "",
+        year: entry["im:releaseDate"]?.label.slice(0, 4), description: entry.summary?.label,
+        cover: cover(entry["im:image"].at(-1)?.label), genres: [entry.category?.attributes.label].filter(Boolean)
+      }));
+      return { works };
+    });
+    res.set("Cache-Control", "public, s-maxage=1800, stale-while-revalidate=86400").json(data);
+  } catch {
+    res.status(502).json({ error: "Destaques temporariamente indisponíveis." });
+  }
+});
+
+async function appleItem(id) {
+  return cached("apple:" + id, async () => {
+    const data = await getJson("https://itunes.apple.com/lookup?country=br&id=" + id.slice(6), { signal: AbortSignal.timeout(10000) });
+    if (!data.results[0]) throw new Error("Obra indisponível");
+    return { item: data.results[0] };
+  });
+}
+
+app.get("/api/work/:kind/:id", async (req, res, next) => {
+  const { id, kind } = req.params;
+  if (!/^apple-\d+$/.test(id)) return next();
+  try {
+    const { item } = await appleItem(id);
+    if (kind !== (item.kind === "ebook" ? "book" : "movie")) return res.sendStatus(404);
+    res.json({ work: { id, kind, title: item.trackName, authors: kind === "book" ? [item.artistName] : [],
+      director: kind === "movie" ? item.artistName : "", cover: cover(item.artworkUrl100),
+      year: item.releaseDate?.slice(0, 4), genres: item.genres || [item.primaryGenreName].filter(Boolean),
+      description: (item.longDescription || item.description || item.shortDescription || "").replace(/<[^>]+>/g, " ")
+    } });
+  } catch {
+    res.status(502).json({ error: "Detalhes temporariamente indisponíveis." });
+  }
+});
 app.get("/api/search", async (req, res) => {
   const query = String(req.query.q || "").trim();
   const type = req.query.type === "movie" ? "movie" : req.query.type === "book" ? "book" : "all";
@@ -149,6 +202,19 @@ app.get("/api/availability/book", async (req, res) => {
 });
 
 app.get("/api/availability/movie/:id", async (req, res) => {
+  if (/^apple-\d+$/.test(req.params.id)) {
+    try {
+      const { item, cachedAt } = await appleItem(req.params.id);
+      const providers = [];
+      for (const [category, price] of [["Comprar", item.trackPrice], ["Alugar", item.trackRentalPrice]]) {
+        if (Number.isFinite(price) && price >= 0 && item.trackViewUrl)
+          providers.push({ category, provider: "Apple TV", link: item.trackViewUrl });
+      }
+      return res.json({ providers, checkedAt: cachedAt });
+    } catch {
+      return res.status(502).json({ error: "Disponibilidade temporariamente indisponível." });
+    }
+  }
   if (!process.env.TMDB_API_KEY) return res.status(503).json({ error: "Disponibilidade indisponível. Configure TMDB_API_KEY." });
   try {
     const result = await cached(`movie:${req.params.id}`, async () => {

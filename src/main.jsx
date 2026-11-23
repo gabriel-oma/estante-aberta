@@ -301,6 +301,26 @@ function App() {
   );
 }
 
+function FeaturedRow({ kind, openWork }) {
+  const [works, setWorks] = useState(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/featured/" + kind, { signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        setWorks(data.works);
+      })
+      .catch(() => { if (!controller.signal.aborted) setWorks([]); });
+    return () => controller.abort();
+  }, [kind]);
+  return <section className="section-block">
+    <div className="section-heading"><h2>{kind === "book" ? "Livros em destaque" : "Filmes em destaque"}</h2></div>
+    {works?.length ? <div className="book-row">{works.map(item =>
+      <WorkCard key={item.id} item={item} onClick={() => openWork(item)} />
+    )}</div> : <p className="muted" role="status">{works ? "Destaques indisponíveis no momento." : "Carregando destaques…"}</p>}
+  </section>;
+}
 function ExplorePage({ query, setQuery, type, setType, search, busy, message, collections, openWork, results, genre, setGenre, genres, setPage, setActiveCollection }) {
   return <div className="page-wrap">
     <section className="hero">
@@ -327,6 +347,8 @@ function ExplorePage({ query, setQuery, type, setType, search, busy, message, co
       {results.length ? <div className="book-row">{results.map((item) => <WorkCard key={`${item.kind}-${item.id}`} item={item} onClick={() => openWork(item)} />)}</div> : <p className="muted">Nenhuma obra encontrada para esse gênero.</p>}
     </section>}
 
+    {type !== "movie" && <FeaturedRow kind="book" openWork={openWork} />}
+    {type !== "book" && <FeaturedRow kind="movie" openWork={openWork} />}
     <section className="community-section section-block">
       <div className="section-heading"><div><span className="eyebrow">CURADORIAS DA COMUNIDADE</span><h2>Das estantes da comunidade</h2><p>Listas feitas por quem ama encontrar e compartilhar.</p></div>
         <button className="text-button" onClick={() => { setPage("public"); setActiveCollection(null); }}>Ver todas <ArrowRight size={16} /></button></div>
